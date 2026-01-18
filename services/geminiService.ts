@@ -2,25 +2,30 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Escrow, Message } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-
 export const analyzeDispute = async (escrow: Escrow): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
   const messagesText = escrow.messages
     .map(m => `${m.senderId === escrow.creatorId ? 'Creator' : 'Partner'}: ${m.text}`)
     .join('\n');
 
   const prompt = `
-    Analyze this escrow dispute for "ESCROWNOW" (Nigeria).
-    Escrow Title: ${escrow.title}
-    Amount: ${escrow.amount}
-    Status: ${escrow.status}
-    Dispute Reason: ${escrow.disputeReason}
+    Analyze this escrow dispute for "ESCROWNOW" (a Nigerian secure trading platform).
     
-    Conversation History:
+    TRANSACTION DETAILS:
+    Title: ${escrow.title}
+    Amount: ${escrow.currency} ${escrow.amount.toLocaleString()}
+    Description: ${escrow.description}
+    Status: ${escrow.status}
+    
+    CONVERSATION LOG:
     ${messagesText}
     
-    Provide a neutral summary and a recommendation for resolution based on the chat history. 
-    Act as a professional mediator. Keep it brief but thorough.
+    TASK:
+    Act as a professional, neutral third-party mediator. 
+    1. Summarize the conflict based ONLY on the chat history.
+    2. Provide a fair recommendation for resolution (e.g., refund percentage, or proof of delivery required).
+    3. Keep the tone professional and helpful.
   `;
 
   try {
@@ -31,16 +36,17 @@ export const analyzeDispute = async (escrow: Escrow): Promise<string> => {
     return response.text || "Unable to analyze dispute at this time.";
   } catch (error) {
     console.error("Gemini Error:", error);
-    return "The AI mediator is currently offline. Please contact human support.";
+    return "The AI mediator is currently assessing higher-than-usual volume. Please contact human support at support@escrownow.ng.";
   }
 };
 
 export const getQuickAdvice = async (query: string): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: `You are an AI assistant for ESCROWNOW, a Nigerian escrow platform. 
-      Answer this user query concisely: ${query}`,
+      Answer this user query concisely about how escrow works or safety tips: ${query}`,
     });
     return response.text || "I'm not sure how to help with that.";
   } catch (error) {
