@@ -1,16 +1,24 @@
 
 import React, { useState, useEffect } from 'react';
 import { HashRouter, Routes, Route, useNavigate, Link } from 'react-router-dom';
-import { collection, query, where, onSnapshot, doc, updateDoc, arrayUnion, addDoc } from 'firebase/firestore';
-import { db } from './services/firebase';
+import { 
+  collection, query, where, onSnapshot, doc, updateDoc, 
+  arrayUnion, addDoc, setDoc, getDoc 
+} from 'firebase/firestore';
+import { 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut,
+  User as FirebaseUser 
+} from 'firebase/auth';
+import { db, auth } from './services/firebase';
 import { Layout } from './components/Layout';
 import { EscrowCard } from './components/EscrowCard';
 import { Chat } from './components/Chat';
 import { AppState, User, Escrow, EscrowStatus, Message } from './types';
 import { APP_NAME, COMMISSION_RATE, CURRENCY } from './constants';
 import { analyzeDispute } from './services/geminiService';
-
-const AUTH_KEY = 'escrow_now_auth';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>({
@@ -19,17 +27,35 @@ const App: React.FC = () => {
     loading: true,
   });
 
+  // Track Firebase Auth State
   useEffect(() => {
-    const savedAuth = localStorage.getItem(AUTH_KEY);
-    if (savedAuth) {
-      setState(prev => ({ ...prev, currentUser: JSON.parse(savedAuth) }));
-    } else {
-      setState(prev => ({ ...prev, loading: false }));
-    }
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // Fetch extra profile data from Firestore (like display name)
+        const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
+        const userData = userDoc.exists() ? userDoc.data() : {};
+        
+        const user: User = {
+          id: firebaseUser.uid,
+          email: firebaseUser.email || '',
+          name: userData.name || firebaseUser.email?.split('@')[0] || 'User',
+          phone: userData.phone || '+234'
+        };
+        setState(prev => ({ ...prev, currentUser: user, loading: false }));
+      } else {
+        setState(prev => ({ ...prev, currentUser: null, loading: false }));
+      }
+    });
+
+    return () => unsubscribe();
   }, []);
 
+  // Real-time listener for Escrows (Filtered by Current User Email)
   useEffect(() => {
-    if (!state.currentUser) return;
+    if (!state.currentUser) {
+      setState(prev => ({ ...prev, escrows: [] }));
+      return;
+    }
 
     const email = state.currentUser.email;
     const q = query(
@@ -43,23 +69,16 @@ const App: React.FC = () => {
         escrows.push({ id: doc.id, ...doc.data() } as Escrow);
       });
       escrows.sort((a, b) => b.createdAt - a.createdAt);
-      setState(prev => ({ ...prev, escrows, loading: false }));
+      setState(prev => ({ ...prev, escrows }));
     }, (error) => {
       console.error("Firestore Error:", error);
-      setState(prev => ({ ...prev, loading: false }));
     });
 
     return () => unsubscribe();
   }, [state.currentUser]);
 
-  const handleLogin = (user: User) => {
-    localStorage.setItem(AUTH_KEY, JSON.stringify(user));
-    setState(prev => ({ ...prev, currentUser: user }));
-  };
-
   const handleLogout = () => {
-    localStorage.removeItem(AUTH_KEY);
-    setState(prev => ({ ...prev, currentUser: null }));
+    signOut(auth);
   };
 
   const updateEscrowStatus = async (id: string, status: EscrowStatus) => {
@@ -97,7 +116,7 @@ const App: React.FC = () => {
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600"></div>
           </div>
         ) : !state.currentUser ? (
-          <AuthView onLogin={handleLogin} />
+          <AuthView />
         ) : (
           <Routes>
             <Route path="/" element={<Dashboard state={state} />} />
@@ -110,40 +129,84 @@ const App: React.FC = () => {
   );
 };
 
-const AuthView: React.FC<{ onLogin: (user: User) => void }> = ({ onLogin }) => {
+const AuthView: React.FC = () => {
+  const [isRegistering, setIsRegistering] = useState(false);
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [name, setName] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !name) return;
-    onLogin({
-      id: email.toLowerCase(),
-      email: email.toLowerCase(),
-      name,
-      phone: '+234'
-    });
+    setError('');
+    setLoading(true);
+
+    try {
+      if (isRegistering) {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        // Save profile to Firestore
+        await setDoc(doc(db, "users", userCredential.user.uid), {
+          name: name,
+          email: email,
+          createdAt: Date.now()
+        });
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+    } catch (err: any) {
+      setError(err.message || 'Authentication failed');
+      setLoading(false);
+    }
   };
 
   return (
     <div className="max-w-md mx-auto mt-12 bg-white p-8 rounded-2xl border border-slate-200 shadow-xl">
       <div className="text-center mb-8">
         <h2 className="text-3xl font-extrabold text-slate-800">{APP_NAME}</h2>
-        <p className="text-slate-500 mt-2">Nigerian Secure Trading Platform</p>
+        <p className="text-slate-500 mt-2">Nigerian Secure Trading Portal</p>
       </div>
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Full Name</label>
-          <input type="text" required value={name} onChange={e => setName(e.target.value)} className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-green-500 outline-none" placeholder="Business Name or Individual" />
+
+      {error && (
+        <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm mb-4 border border-red-100">
+          {error}
         </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {isRegistering && (
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Full Name / Business Name</label>
+            <input type="text" required value={name} onChange={e => setName(e.target.value)} className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-green-500 outline-none" placeholder="Enter your name" />
+          </div>
+        )}
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">Email Address</label>
           <input type="email" required value={email} onChange={e => setEmail(e.target.value)} className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-green-500 outline-none" placeholder="email@example.com" />
         </div>
-        <button type="submit" className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-xl transition-all shadow-lg">
-          Start Trading
+        <div>
+          <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
+          <input type="password" required value={password} onChange={e => setPassword(e.target.value)} className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-green-500 outline-none" placeholder="••••••••" />
+        </div>
+        
+        <button 
+          type="submit" 
+          disabled={loading}
+          className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-xl transition-all shadow-lg flex justify-center items-center"
+        >
+          {loading ? <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : (isRegistering ? 'Create Account' : 'Sign In')}
         </button>
       </form>
+
+      <div className="mt-6 text-center text-sm text-slate-500">
+        {isRegistering ? 'Already have an account?' : "Don't have an account?"}
+        <button 
+          onClick={() => setIsRegistering(!isRegistering)}
+          className="text-green-600 font-bold ml-1 hover:underline"
+        >
+          {isRegistering ? 'Sign In' : 'Register Now'}
+        </button>
+      </div>
     </div>
   );
 };
@@ -199,7 +262,7 @@ const NewEscrow: React.FC<{ creator: User }> = ({ creator }) => {
       currency: 'NGN',
       creatorId: creator.id,
       partnerEmail: formData.partnerEmail.toLowerCase(),
-      involvedParties: [creator.email, formData.partnerEmail.toLowerCase()],
+      involvedParties: [creator.email.toLowerCase(), formData.partnerEmail.toLowerCase()],
       creatorRole: formData.role,
       status: EscrowStatus.PENDING,
       createdAt: Date.now(),
